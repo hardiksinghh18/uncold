@@ -1,5 +1,6 @@
 import dns from "dns";
-import { Pool, QueryResult, QueryResultRow } from "pg";
+import { Pool } from "pg";
+import type { QueryResult, QueryResultRow } from "pg";
 import dotenv from "dotenv";
 
 dotenv.config();
