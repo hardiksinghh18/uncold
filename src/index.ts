@@ -2,10 +2,15 @@ import express, { Request, Response } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import multer from "multer";
+import dns from "dns";
 import { GoogleGenAI } from "@google/genai";
 import { PDFParse } from "pdf-parse";
+import { initDb } from "./db";
 
 dotenv.config();
+
+// Ensure fast IPv4 resolution for external APIs on Windows
+dns.setDefaultResultOrder("ipv4first");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -149,7 +154,7 @@ Candidate Resume:
 ${parsedResumeText.slice(0, 8000)}`;
 
       const response = await ai.models.generateContent({
-        model: "gemini-1.5-flash",
+        model: "gemini-3.5-flash",
         contents: prompt,
         config: {
           responseMimeType: "application/json",
@@ -186,7 +191,8 @@ ${parsedResumeText.slice(0, 8000)}`;
   }
 );
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🚀 Uncold Backend running at http://localhost:${PORT}`);
   console.log(`📡 CORS allowed for: ${FRONTEND_URL}`);
+  await initDb();
 });
