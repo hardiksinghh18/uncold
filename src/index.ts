@@ -8,7 +8,6 @@ import path from "path";
 import crypto from "crypto";
 import { GoogleGenAI } from "@google/genai";
 import { google } from "googleapis";
-import { PDFParse } from "pdf-parse";
 import { initDb, query } from "./db";
 import { sendGmailMessage, checkThreadReplies } from "./gmail";
 import { extractRichJdMetadata } from "./jdMetadata";
@@ -188,8 +187,9 @@ app.use(async (_req: Request, _res: Response, next: NextFunction) => {
   next();
 });
 
-// Helper to extract text from PDF buffer
+// Helper to extract text from PDF buffer (lazy-loaded to avoid serverless cold-start DOMMatrix issues)
 async function extractTextFromPdf(buffer: Buffer): Promise<string> {
+  const { PDFParse } = await import("pdf-parse");
   const parser = new PDFParse({ data: new Uint8Array(buffer) });
   try {
     const textResult = await parser.getText();
@@ -199,7 +199,16 @@ async function extractTextFromPdf(buffer: Buffer): Promise<string> {
   }
 }
 
-// Health Check
+// Root & Health Check
+app.get("/", (_req: Request, res: Response) => {
+  res.json({
+    status: "ok",
+    service: "uncold-backend",
+    health: "/api/health",
+    timestamp: new Date().toISOString(),
+  });
+});
+
 app.get("/api/health", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
