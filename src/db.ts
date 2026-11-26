@@ -20,8 +20,8 @@ export const pool = new Pool({
     rejectUnauthorized: false,
   },
   connectionTimeoutMillis: 10000,
-  max: 5,
-  idleTimeoutMillis: 30000,
+  max: process.env.VERCEL ? 3 : 5,
+  idleTimeoutMillis: process.env.VERCEL ? 10000 : 30000,
 });
 
 /**

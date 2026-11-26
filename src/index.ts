@@ -114,7 +114,46 @@ dns.setDefaultResultOrder("ipv4first");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+const FRONTEND_URL = (process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/+$/, "");
+
+function getAllowedOrigins(): string[] {
+  const configured = (process.env.ALLOWED_ORIGINS || process.env.FRONTEND_URL || "")
+    .split(",")
+    .map((o) => o.trim().replace(/\/+$/, ""))
+    .filter(Boolean);
+  return Array.from(
+    new Set([
+      ...configured,
+      FRONTEND_URL,
+      "http://localhost:3000",
+      "http://127.0.0.1:3000",
+    ])
+  );
+}
+
+function getBackendPublicOrigin(): string {
+  if (process.env.BACKEND_PUBLIC_URL) {
+    return process.env.BACKEND_PUBLIC_URL.replace(/\/+$/, "");
+  }
+  if (process.env.VERCEL_PROJECT_PRODUCTION_URL) {
+    return `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`;
+  }
+  if (process.env.VERCEL_URL) {
+    return `https://${process.env.VERCEL_URL}`;
+  }
+  return `http://localhost:${PORT}`;
+}
+
+let dbInitPromise: Promise<void> | null = null;
+function ensureDbInitialized(): Promise<void> {
+  if (!dbInitPromise) {
+    dbInitPromise = initDb().catch((err) => {
+      dbInitPromise = null;
+      throw err;
+    });
+  }
+  return dbInitPromise;
+}
 
 // Configure Multer for in-memory PDF uploads (max 10MB)
 const storage = multer.memoryStorage();
@@ -133,13 +172,21 @@ const upload = multer({
 // Middleware
 app.use(
   cors({
-    origin: [FRONTEND_URL, "http://localhost:3000", "http://127.0.0.1:3000"],
+    origin: getAllowedOrigins(),
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+app.use(async (_req: Request, _res: Response, next: NextFunction) => {
+  try {
+    await ensureDbInitialized();
+  } catch (err) {
+    console.error("DB cold-start init error:", err);
+  }
+  next();
+});
 
 // Helper to extract text from PDF buffer
 async function extractTextFromPdf(buffer: Buffer): Promise<string> {
@@ -1011,7 +1058,7 @@ app.get("/api/gmail/connect", requireAuth, async (req: Request, res: Response): 
       return;
     }
 
-    const backendOrigin = process.env.BACKEND_PUBLIC_URL || `http://localhost:${PORT}`;
+    const backendOrigin = getBackendPublicOrigin();
     const redirectUri = process.env.GOOGLE_GMAIL_REDIRECT_URI || `${backendOrigin}/api/gmail/callback`;
 
     const oauth2Client = new google.auth.OAuth2(clientId, clientSecret, redirectUri);
@@ -1080,7 +1127,7 @@ app.get("/api/gmail/callback", async (req: Request, res: Response): Promise<void
 
     const clientId = process.env.GOOGLE_CONSOLE_CLIENT_ID;
     const clientSecret = process.env.GOOGLE_CONSOLE_CLIENT_SECRET;
-    const backendOrigin = process.env.BACKEND_PUBLIC_URL || `http://localhost:${PORT}`;
+    const backendOrigin = getBackendPublicOrigin();
     const redirectUri = process.env.GOOGLE_GMAIL_REDIRECT_URI || `${backendOrigin}/api/gmail/callback`;
 
     const oauth2Client = new google.auth.OAuth2(clientId, clientSecret, redirectUri);
@@ -1208,7 +1255,7 @@ app.post("/api/gmail/send", requireAuth, sendRateLimiter, async (req: Request, r
     );
 
     emailRecordId = insertResult.rows[0]?.id;
-    const backendOrigin = process.env.BACKEND_PUBLIC_URL || `http://localhost:${PORT}`;
+    const backendOrigin = getBackendPublicOrigin();
     const trackingPixelUrl = emailRecordId ? `${backendOrigin}/api/track/open/${emailRecordId}` : undefined;
 
     const sendResult = await sendGmailMessage({
@@ -1770,8 +1817,12 @@ app.post("/api/profile", requireAuth, async (req: Request, res: Response): Promi
   }
 });
 
-app.listen(PORT, async () => {
-  console.log(`🚀 Uncold Backend running at http://localhost:${PORT}`);
-  console.log(`📡 CORS allowed for: ${FRONTEND_URL}`);
-  await initDb();
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, async () => {
+    console.log(`🚀 Uncold Backend running at http://localhost:${PORT}`);
+    console.log(`📡 CORS allowed for: ${FRONTEND_URL}`);
+    await ensureDbInitialized();
+  });
+}
+
+export default app;
