@@ -221,7 +221,7 @@ app.get("/api/health", (_req: Request, res: Response) => {
 // Helper: Ultra-fast multi-model generator with instant failover to bypass 503 high-demand retry loops
 async function callFastGemini(
   ai: GoogleGenAI,
-  prompt: string,
+  contents: any,
   options: { maxOutputTokens?: number; temperature?: number } = {}
 ): Promise<string> {
   const models = ["gemini-flash-lite-latest", "gemini-3-flash-preview", "gemini-3.1-flash-lite"];
@@ -231,7 +231,7 @@ async function callFastGemini(
     try {
       const response = await ai.models.generateContent({
         model,
-        contents: prompt,
+        contents,
         config: {
           responseMimeType: "application/json",
           temperature: options.temperature ?? 0.2,
@@ -1554,27 +1554,28 @@ app.post(
         try {
           rawText = await extractTextFromPdf(file.buffer);
         } catch (pdfErr: any) {
-          res.status(400).json({
-            error: "Failed to extract text from PDF. Ensure file is not password-protected or corrupt.",
-          });
-          return;
+          console.warn("pdf-parse failed, falling back to Gemini native PDF parsing:", pdfErr?.message);
+          rawText = "";
         }
       }
 
-      if (!rawText || rawText.trim().length < 30) {
+      const hasExtractedText = Boolean(rawText && rawText.trim().length >= 30);
+      if (!hasExtractedText && !(file && file.buffer && file.buffer.length > 0)) {
         res.status(400).json({
           error: "Could not read sufficient text from the resume. Please ensure it is a valid PDF.",
         });
         return;
       }
 
-      // 1. Sanitize text and strip repetitive whitespace/blank lines
-      const sanitizedText = rawText
-        .replace(/\r\n/g, "\n")
-        .replace(/[ \t]+/g, " ")
-        .replace(/\n{3,}/g, "\n\n")
-        .trim()
-        .slice(0, 4500);
+      // 1. Sanitize text and strip repetitive whitespace/blank lines (when text extraction succeeded)
+      const sanitizedText = hasExtractedText
+        ? (rawText as string)
+            .replace(/\r\n/g, "\n")
+            .replace(/[ \t]+/g, " ")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim()
+            .slice(0, 4500)
+        : "";
 
       // 2. Fast deterministic regex extraction (<0.1ms)
       const candidateEmail = sanitizedText.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/)?.[0] || "";
@@ -1633,11 +1634,22 @@ Return ONLY a valid JSON object with EXACTLY this structure (no markdown, no cod
   }
 }
 
-Resume Text:
-${sanitizedText}`;
+${hasExtractedText ? `Resume Text:\n${sanitizedText}` : "Extract all fields directly from the attached PDF resume."}`;
+
+      const geminiContents = hasExtractedText
+        ? prompt
+        : [
+            {
+              inlineData: {
+                mimeType: "application/pdf",
+                data: file!.buffer.toString("base64"),
+              },
+            },
+            prompt,
+          ];
 
       // Call ultra-fast Gemini with zero thinking tokens and instant failover
-      const responseText = await callFastGemini(ai, prompt, {
+      const responseText = await callFastGemini(ai, geminiContents, {
         temperature: 0.1,
         maxOutputTokens: 950,
       });
