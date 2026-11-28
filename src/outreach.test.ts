@@ -8,7 +8,11 @@ import {
   isSafePublicUrl,
   sanitizeHeaderValue,
 } from "./security";
-import { extractRichJdMetadata } from "./jdMetadata";
+import {
+  extractFastCompanyName,
+  extractRichJdMetadata,
+  formatBestExperienceForJd,
+} from "./jdMetadata";
 
 // Mirror core backend pure functions to test all edge cases & security invariants
 
@@ -315,5 +319,45 @@ describe("Rich JD Metadata Extraction", () => {
     assert.ok(meta.requiredSkills.includes("Python"));
     assert.ok(meta.requiredSkills.includes("FastAPI"));
     assert.deepEqual(meta.matchedSkills, ["Python"]);
+  });
+
+  test("Does not misclassify tech stack words like 'with PostgreSQL' as company name", () => {
+    const jd = `
+      We are building always-on AI coworkers.
+      About Metaworkers
+      Experience with PostgreSQL, Redis, LangGraph, and RBAC required.
+      Hiring a Full Stack Engineer at Metaworkers.
+    `;
+    assert.equal(extractFastCompanyName(jd), "Metaworkers");
+
+    const techOnlyJd = `Experience with PostgreSQL, Redis, and Docker.`;
+    assert.equal(extractFastCompanyName(techOnlyJd), "");
+  });
+
+  test("Ranks and surfaces the best JD-matching experience bullet points across all roles", () => {
+    const experiences = [
+      {
+        company_name: "RoleOne",
+        designation: "Frontend Engineer",
+        from: "01/2024",
+        to: "Present",
+        responsibilities_projects:
+          "• Built marketing landing pages in HTML and CSS.\n• Migrated 400+ APIs to RTK Query, slashing LCP by 34%.\n• Led sprint planning meetings.",
+      },
+      {
+        company_name: "RoleTwo",
+        designation: "Full Stack Intern",
+        from: "06/2023",
+        to: "12/2023",
+        responsibilities_projects:
+          "• Implemented AI-powered visual matching using pgvector and PostgreSQL, reducing manual work by 65%.",
+      },
+    ];
+
+    const jd = "Hiring an AI Full Stack Engineer with PostgreSQL, pgvector, and vector search experience.";
+    const ranked = formatBestExperienceForJd(experiences, jd, 2);
+
+    assert.ok(ranked.includes("pgvector and PostgreSQL"));
+    assert.ok(!ranked.includes("sprint planning"));
   });
 });

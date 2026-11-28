@@ -10,7 +10,11 @@ import { GoogleGenAI } from "@google/genai";
 import { google } from "googleapis";
 import { initDb, query } from "./db";
 import { sendGmailMessage, checkThreadReplies } from "./gmail";
-import { extractRichJdMetadata } from "./jdMetadata";
+import {
+  extractFastCompanyName,
+  extractRichJdMetadata,
+  formatBestExperienceForJd,
+} from "./jdMetadata";
 import {
   encryptToken,
   decryptToken,
@@ -466,14 +470,17 @@ app.post(
         parsedResumeText = directResumeText.trim();
       } else if (resolvedProfile && (resolvedProfile.full_name || resolvedProfile.skills)) {
         const topSkills = Array.isArray(resolvedProfile.skills) ? resolvedProfile.skills.slice(0, 15).join(", ") : "";
-        const recentProjects = Array.isArray(resolvedProfile.projects_and_past_experience)
-          ? resolvedProfile.projects_and_past_experience.slice(0, 2).map((p: any) => `${p.designation} at ${p.company_name}: ${(p.responsibilities_projects || "").slice(0, 150)}`).join("; ")
-          : "";
+        const bestExperiencePoints = formatBestExperienceForJd(
+          resolvedProfile.projects_and_past_experience,
+          jobDescription,
+          6
+        );
         parsedResumeText = `
 Candidate: ${resolvedProfile.full_name || "Applicant"} | ${resolvedProfile.headline || "Software Engineer"}
-Summary: ${(resolvedProfile.introduction || "").slice(0, 200)}
+Summary: ${(resolvedProfile.introduction || "").slice(0, 250)}
 Key Skills: ${topSkills}
-Experience: ${recentProjects}
+Best JD-Matching Experience Points (use the strongest matching points):
+${bestExperiencePoints}
 ${linksInfo.linksPromptSummary}
         `.trim();
       }
@@ -650,17 +657,7 @@ app.post("/api/generate-stream", requireAuth, aiRateLimiter, async (req: Request
     }
 
     // Extract Company Name & Job Title quickly for tracking & grouping
-    let fastCompanyName = "";
-    const companyExplicitMatch = jobDescription.match(/(?:Company|Organization|Startup)\s*[:\-]\s*([^\r\n,]+)/i);
-    const companyAtMatch = jobDescription.match(/\b(?:at|with)\s+([A-Z][A-Za-z0-9.&-]*(?:\s+[A-Z][A-Za-z0-9.&-]*){0,2})(?=[.,\s\r\n]|$)/);
-    if (companyExplicitMatch) {
-      fastCompanyName = companyExplicitMatch[1].trim();
-    } else if (companyAtMatch) {
-      fastCompanyName = companyAtMatch[1].trim();
-    } else if (fastRecipientEmail && !/@(gmail|yahoo|outlook|hotmail|icloud|protonmail)\./i.test(fastRecipientEmail)) {
-      const domainPart = fastRecipientEmail.split("@")[1]?.split(".")[0] || "";
-      if (domainPart) fastCompanyName = domainPart.charAt(0).toUpperCase() + domainPart.slice(1);
-    }
+    const fastCompanyName = extractFastCompanyName(jobDescription, fastRecipientEmail);
 
     let fastJobTitle = "";
     const roleMatch = jobDescription.match(/(?:hiring\s+(?:a|an)\s+|looking for\s+(?:a|an)\s+|Role\s*[:\-]\s*|Position\s*[:\-]\s*)([A-Za-z0-9/+\- ]{3,50}?)(?=\s+(?:at|in|with|for)\b|[\r\n.,(]|$)/i);
@@ -711,17 +708,13 @@ app.post("/api/generate-stream", requireAuth, aiRateLimiter, async (req: Request
       });
       const alignedText = alignedSkillsList.slice(0, 8).join(", ");
       const otherSkills = allSkills.filter((s) => !alignedSkillsList.includes(s)).slice(0, 10).join(", ");
-      const introSummary = resolvedProfile.introduction ? `\nExperience Summary: ${resolvedProfile.introduction.slice(0, 220)}` : "";
-      const recentProjects = Array.isArray(resolvedProfile.projects_and_past_experience)
-        ? resolvedProfile.projects_and_past_experience
-            .slice(0, 2)
-            .map(
-              (p: any) =>
-                `${p.designation} at ${p.company_name}${p.from ? ` (${p.from}–${p.to || "Present"})` : ""}: ${(p.responsibilities_projects || "").slice(0, 160)}`
-            )
-            .join("; ")
-        : "";
-      parsedResumeText = `Candidate: ${candidateName} | ${resolvedProfile.headline || "Software Engineer"}${candidateLocation}${introSummary}${alignedText ? `\nJD-Aligned Skills: ${alignedText}` : ""}\nOther Core Skills: ${otherSkills}\nWork Experience: ${recentProjects}\n${linksInfo.linksPromptSummary}`;
+      const introSummary = resolvedProfile.introduction ? `\nExperience Summary: ${resolvedProfile.introduction.slice(0, 250)}` : "";
+      const bestExperiencePoints = formatBestExperienceForJd(
+        resolvedProfile.projects_and_past_experience,
+        safeJd,
+        6
+      );
+      parsedResumeText = `Candidate: ${candidateName} | ${resolvedProfile.headline || "Software Engineer"}${candidateLocation}${introSummary}${alignedText ? `\nJD-Aligned Skills: ${alignedText}` : ""}\nOther Core Skills: ${otherSkills}\nBest JD-Matching Experience Points (prioritize the strongest matching points):\n${bestExperiencePoints}\n${linksInfo.linksPromptSummary}`;
     }
 
     if (!parsedResumeText.trim()) {
@@ -734,14 +727,18 @@ app.post("/api/generate-stream", requireAuth, aiRateLimiter, async (req: Request
     res.setHeader("Connection", "keep-alive");
     if (res.flushHeaders) res.flushHeaders();
 
+    const shortHeadline = (resolvedProfile?.headline || "Software Engineer").split(/[|•·]/)[0].trim();
+    const topMatchedSkill = alignedSkillsList[0] || "";
+    const skillTag = topMatchedSkill ? ` (${topMatchedSkill})` : "";
+
     const smartDefaultSubject =
       fastJobTitle && fastCompanyName
-        ? `${fastJobTitle} @ ${fastCompanyName} — Quick note`
+        ? `${fastJobTitle} @ ${fastCompanyName} — ${candidateName}`
         : fastCompanyName
-        ? `Quick note re: ${fastCompanyName} engineering role`
+        ? `${shortHeadline} for ${fastCompanyName}${skillTag}`
         : fastJobTitle
-        ? `Quick note re: ${fastJobTitle} opening`
-        : "Quick note regarding your open role";
+        ? `${fastJobTitle} — ${candidateName}${skillTag}`
+        : `${shortHeadline}${skillTag} — Application`;
 
     const initialSubject = fastSpecifiedSubject || smartDefaultSubject;
     const candidateSkillsList: string[] = Array.isArray(resolvedProfile?.skills)
@@ -1574,7 +1571,7 @@ app.post(
             .replace(/[ \t]+/g, " ")
             .replace(/\n{3,}/g, "\n\n")
             .trim()
-            .slice(0, 4500)
+            .slice(0, 8500)
         : "";
 
       // 2. Fast deterministic regex extraction (<0.1ms)
@@ -1596,7 +1593,7 @@ Pre-detected:
 Instructions:
 - Keep skills deduplicated.
 - For dates, use MM/YYYY (e.g. "06/2023") or Present.
-- Keep responsibilities concise (concise bullet points or 2-3 sentences).
+- IMPORTANT: Preserve ALL bullet points from EVERY work experience and project in full — do NOT merge or drop bullets. Format each role's "responsibilities_projects" as newline-separated bullets starting with "• " (e.g. "• Built X...\n• Reduced Y...").
 - Extract university, degree, and graduation year.
 
 Return ONLY a valid JSON object with EXACTLY this structure (no markdown, no code fences):
@@ -1651,7 +1648,7 @@ ${hasExtractedText ? `Resume Text:\n${sanitizedText}` : "Extract all fields dire
       // Call ultra-fast Gemini with zero thinking tokens and instant failover
       const responseText = await callFastGemini(ai, geminiContents, {
         temperature: 0.1,
-        maxOutputTokens: 950,
+        maxOutputTokens: 2200,
       });
       let parsedData: any = {};
       try {
@@ -1659,6 +1656,18 @@ ${hasExtractedText ? `Resume Text:\n${sanitizedText}` : "Extract all fields dire
       } catch {
         const cleaned = responseText.replace(/```json/gi, "").replace(/```/g, "").trim();
         parsedData = JSON.parse(cleaned);
+      }
+
+      if (Array.isArray(parsedData.projects_and_past_experience)) {
+        parsedData.projects_and_past_experience = parsedData.projects_and_past_experience.map((exp: any) => {
+          const rawResp = exp?.responsibilities_projects;
+          const normalized = Array.isArray(rawResp)
+            ? rawResp.map((r: any) => `• ${String(r).replace(/^[•\-*\s]+/, "").trim()}`).join("\n")
+            : String(rawResp || "")
+                .replace(/\s+[•]\s+/g, "\n• ")
+                .trim();
+          return { ...exp, responsibilities_projects: normalized };
+        });
       }
 
       // Backfill pre-detected fields if missing from AI output
